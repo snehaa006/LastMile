@@ -9,7 +9,20 @@ Run:
     streamlit run app.py
 """
 
+import os
+
 import streamlit as st
+
+# On Streamlit Community Cloud, API keys are set as "secrets" (st.secrets),
+# not real environment variables. Mirror them into os.environ *before*
+# importing config.py, so its os.getenv() calls work unchanged whether
+# you're running locally with .env or deployed with Streamlit secrets.
+try:
+    for _key in ("LLM_PROVIDER", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        if _key in st.secrets:
+            os.environ.setdefault(_key, st.secrets[_key])
+except Exception:
+    pass  # no secrets.toml — normal for local dev, .env handles it there
 
 from agents.orchestrator import EduMindAgent
 from config import NCERT_CODES
