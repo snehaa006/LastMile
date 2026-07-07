@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import re
 import time
 
 import requests
@@ -58,7 +59,7 @@ class NCERTFetcher:
         url = self._build_url(class_num, subject, chapter)
         console.print(f"[blue]↓ Fetching:[/blue] {url}")
 
-        response = self._download(url)
+        response = self._download(url, class_num, subject, chapter)
         with open(local_path, "wb") as f:
             f.write(response.content)
 
@@ -93,7 +94,29 @@ class NCERTFetcher:
         filename = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}.pdf"
         return os.path.join(NCERT_PDF_PATH, filename)
 
-    def _download(self, url: str) -> requests.Response:
+    def _sibling_part_hint(self, class_num: int, subject: str) -> str:
+        """
+        NCERT splits some subjects into two books (Part 1 / Part 2) with
+        non-overlapping chapter numbers — e.g. Class 11 Physics Part 1 might
+        only go up to chapter 8, with 9+ living in Part 2. A 404 on a
+        "_1"/"_2" subject is very often just the wrong part for that chapter
+        number, so suggest the sibling if one exists in the catalog.
+        """
+        match = re.match(r"^(.+)_([12])$", subject)
+        if not match:
+            return ""
+        base, part = match.group(1), match.group(2)
+        sibling = f"{base}_{'2' if part == '1' else '1'}"
+        if sibling in NCERT_CODES.get(class_num, {}):
+            return (
+                f" This subject is split into Part 1/Part 2 books with "
+                f"non-overlapping chapter numbers — try subject '{sibling}' instead."
+            )
+        return ""
+
+    def _download(
+        self, url: str, class_num: int, subject: str, chapter: int
+    ) -> requests.Response:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -118,11 +141,14 @@ class NCERTFetcher:
             except requests.exceptions.HTTPError as e:
                 # A real HTTP error (404, etc.) means the URL/chapter combo is
                 # wrong — retrying won't help, fail fast with a clear message.
+                hint = self._sibling_part_hint(class_num, subject)
                 raise RuntimeError(
                     f"Failed to download NCERT PDF.\n"
                     f"URL: {url}\n"
                     f"Error: {e}\n"
-                    f"Tip: Verify the class/subject/chapter combination exists."
+                    f"Tip: Chapter {chapter} doesn't exist for class {class_num} "
+                    f"'{subject}'.{hint} You can check the real chapter list at "
+                    f"https://ncert.nic.in/textbook.php."
                 ) from e
             except requests.exceptions.RequestException as e:
                 # Connection reset / timeout / DNS blip — can be transient,
