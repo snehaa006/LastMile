@@ -10,6 +10,8 @@ Usage:
 """
 
 import os
+import time
+
 import requests
 from pathlib import Path
 from rich.console import Console
@@ -17,6 +19,9 @@ from rich.console import Console
 from config import NCERT_CODES, NCERT_BASE_URL, NCERT_PDF_PATH
 
 console = Console()
+
+MAX_RETRIES     = 3
+RETRY_BACKOFF_S = 2   # doubles each retry: 2s, 4s, 8s
 
 
 class NCERTFetcher:
@@ -94,20 +99,52 @@ class NCERTFetcher:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "application/pdf,application/octet-stream,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://ncert.nic.in/textbook.php",
         }
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            if "application/pdf" not in resp.headers.get("Content-Type", ""):
-                raise ValueError(
-                    f"URL did not return a PDF. Got: {resp.headers.get('Content-Type')}"
-                )
-            return resp
-        except requests.exceptions.HTTPError as e:
-            raise RuntimeError(
-                f"Failed to download NCERT PDF.\n"
-                f"URL: {url}\n"
-                f"Error: {e}\n"
-                f"Tip: Verify the class/subject/chapter combination exists."
-            ) from e
+
+        last_error: Exception = RuntimeError("unreachable")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.get(url, headers=headers, timeout=30)
+                resp.raise_for_status()
+                if "application/pdf" not in resp.headers.get("Content-Type", ""):
+                    raise ValueError(
+                        f"URL did not return a PDF. Got: {resp.headers.get('Content-Type')}"
+                    )
+                return resp
+            except requests.exceptions.HTTPError as e:
+                # A real HTTP error (404, etc.) means the URL/chapter combo is
+                # wrong — retrying won't help, fail fast with a clear message.
+                raise RuntimeError(
+                    f"Failed to download NCERT PDF.\n"
+                    f"URL: {url}\n"
+                    f"Error: {e}\n"
+                    f"Tip: Verify the class/subject/chapter combination exists."
+                ) from e
+            except requests.exceptions.RequestException as e:
+                # Connection reset / timeout / DNS blip — can be transient,
+                # so retry with backoff before giving up.
+                last_error = e
+                if attempt < MAX_RETRIES:
+                    wait = RETRY_BACKOFF_S * (2 ** (attempt - 1))
+                    console.print(
+                        f"[yellow]⚠ Connection issue (attempt {attempt}/{MAX_RETRIES}):[/yellow] "
+                        f"{e}\nRetrying in {wait}s..."
+                    )
+                    time.sleep(wait)
+
+        raise RuntimeError(
+            f"Could not reach NCERT after {MAX_RETRIES} attempts.\n"
+            f"URL: {url}\n"
+            f"Last error: {last_error}\n"
+            f"This usually means ncert.nic.in is refusing connections from this "
+            f"server's network (common for cloud/datacenter IPs hitting Indian "
+            f"government sites) rather than a real outage. If this keeps "
+            f"happening only when deployed (and works locally), the fix isn't "
+            f"retrying harder — it's pre-fetching PDFs somewhere this block "
+            f"doesn't apply and shipping them with the app instead of fetching "
+            f"live on every deploy."
+        ) from last_error
