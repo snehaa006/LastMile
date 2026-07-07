@@ -61,7 +61,14 @@ class LLMClient:
             response = self._client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(max_output_tokens=max_tokens),
+                config=types.GenerateContentConfig(
+                    max_output_tokens=max_tokens,
+                    # Gemini 2.5's "thinking" tokens count against
+                    # max_output_tokens — for these structured JSON-extraction
+                    # prompts we don't need reasoning, and leaving thinking on
+                    # silently eats the budget and truncates the real answer.
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
             )
             return response.text or ""
 
