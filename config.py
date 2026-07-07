@@ -12,6 +12,7 @@ BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 CHROMA_DB_PATH  = os.path.join(BASE_DIR, "data", "chroma_db")
 NCERT_PDF_PATH  = os.path.join(BASE_DIR, "data", "ncert_pdfs")
 PYQ_PATH        = os.path.join(BASE_DIR, "data", "pyqs")
+UPLOAD_PDF_PATH = os.path.join(BASE_DIR, "data", "uploads")
 
 # ── Model Settings ────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # local, no API needed

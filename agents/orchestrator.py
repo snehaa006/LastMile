@@ -26,12 +26,16 @@ Usage:
     result = agent.process_chapter(class_num=10, subject="science", chapter=3)
 """
 
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 
+from config import UPLOAD_PDF_PATH
 from pipeline.flashcard_gen     import Flashcard, FlashcardGenerator
 from pipeline.formula_sheet_gen import FormulaSheet, FormulaSheetGenerator
 from pipeline.highlight_tagger  import HighlightTagger, TaggedChunk
@@ -98,6 +102,11 @@ class EduMindAgent:
         self.formula_sheet = FormulaSheetGenerator(store=self.store)
         self.notes         = NotesGenerator(store=self.store)
         self.hot_questions = HotQuestionsGenerator(store=self.store)
+        # In-memory record of where each ingested collection's source PDF
+        # lives (and what page range, for uploaded books) — lets
+        # _tag_chapter() re-parse without guessing the source. Lost on
+        # process restart, same as the vector store's in-memory session.
+        self._ingested: dict[str, dict] = {}
         console.print("[green]✓ All pipeline components ready[/green]\n")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -117,12 +126,13 @@ class EduMindAgent:
         notes, hot questions, formula sheet, tests) requires this to have
         run first for the chapter.
         """
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        collection_name = self._collection_name(class_num, subject, chapter)
         console.rule(f"[bold]Ingesting: Class {class_num} | {subject} | Ch.{chapter}[/bold]")
 
         pdf_path = self.fetcher.fetch(class_num, subject, chapter)
         chunks   = self.parser.parse_and_chunk(pdf_path, class_num, subject, chapter)
         self.store.add_chunks(chunks, collection_name)
+        self._ingested[collection_name] = {"pdf_path": pdf_path, "page_range": None}
 
         return IngestResult(
             collection_name = collection_name,
@@ -135,8 +145,14 @@ class EduMindAgent:
 
     def is_ingested(self, class_num: int, subject: str, chapter: int) -> bool:
         """Whether a chapter has already been fetched, parsed, and embedded."""
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
-        return self.store.collection_exists(collection_name)
+        return self.store.collection_exists(self._collection_name(class_num, subject, chapter))
+
+    def collection_name(self, class_num: int, subject: str, chapter: int) -> str:
+        """Public accessor for the collection-name format — lets a caller
+        (e.g. the dashboard) predict the identifier before calling any
+        generate_*() method, including for an upload where subject is
+        derived from slugify(book_title)."""
+        return self._collection_name(class_num, subject, chapter)
 
     def process_chapter(
         self,
@@ -249,7 +265,7 @@ class EduMindAgent:
         Re-generates flashcards for an already-indexed chapter.
         Useful for refreshing the deck without re-downloading the PDF.
         """
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        collection_name = self._collection_name(class_num, subject, chapter)
         return self.flashcard.generate(
             collection_name = collection_name,
             subject         = subject,
@@ -270,7 +286,7 @@ class EduMindAgent:
         Free-text semantic search within an indexed chapter.
         Useful for the student to ask questions about specific concepts.
         """
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        collection_name = self._collection_name(class_num, subject, chapter)
         results = self.store.query(query, collection_name, top_k=top_k)
         return [r.text for r in results]
 
@@ -400,8 +416,11 @@ class EduMindAgent:
     # Internal Helpers
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _collection_name(self, class_num: int, subject: str, chapter: int) -> str:
+        return f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+
     def _require_indexed(self, class_num: int, subject: str, chapter: int) -> str:
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        collection_name = self._collection_name(class_num, subject, chapter)
         if not self.store.collection_exists(collection_name):
             raise RuntimeError(
                 f"Chapter not indexed yet. Run ingest_chapter() first.\n"
@@ -412,9 +431,97 @@ class EduMindAgent:
     def _tag_chapter(
         self, class_num: int, subject: str, chapter: int
     ) -> tuple[list[TaggedChunk], list[str]]:
-        """Re-parses the cached PDF (fast, no network) and tags its chunks."""
-        pdf_path      = self.fetcher.fetch(class_num, subject, chapter)
-        chunks        = self.parser.parse_and_chunk(pdf_path, class_num, subject, chapter)
+        """Re-parses the source PDF (fast, no network for a cached/uploaded
+        file) and tags its chunks. Looks up where the PDF lives — and, for
+        uploaded books, which page range is this "chapter" — from the
+        in-memory ingest registry rather than assuming NCERT."""
+        collection_name = self._collection_name(class_num, subject, chapter)
+        meta = self._ingested.get(collection_name)
+
+        if meta is not None:
+            pdf_path, page_range = meta["pdf_path"], meta["page_range"]
+        elif class_num != 0:
+            # NCERT chapter ingested in an earlier process — fetch() is a
+            # cache hit if the PDF is already on disk.
+            pdf_path, page_range = self.fetcher.fetch(class_num, subject, chapter), None
+        else:
+            raise RuntimeError(
+                "This uploaded book's source PDF isn't available in this "
+                "session (the app may have restarted). Please re-upload and "
+                "re-ingest it."
+            )
+
+        chunks = self.parser.parse_and_chunk(
+            pdf_path, class_num, subject, chapter, page_range=page_range
+        )
         tagged_chunks = self.tagger.tag(chunks)
         key_terms     = self.tagger.get_key_terms(tagged_chunks)
         return tagged_chunks, key_terms
+
+    def slugify(self, text: str, max_len: int = 40) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+        return slug[:max_len] or "untitled"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Custom uploads (books that aren't in the NCERT catalog)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def save_uploaded_pdf(self, file_bytes: bytes, filename: str) -> str:
+        """Saves an uploaded PDF to local disk and returns its path."""
+        Path(UPLOAD_PDF_PATH).mkdir(parents=True, exist_ok=True)
+        safe_name = self.slugify(Path(filename).stem) + ".pdf"
+        path = os.path.join(UPLOAD_PDF_PATH, safe_name)
+        with open(path, "wb") as f:
+            f.write(file_bytes)
+        return path
+
+    def detect_chapters(self, pdf_path: str) -> dict:
+        """
+        Returns {"toc": [...], "page_count": N} for an uploaded PDF, so the
+        caller can offer a chapter picker. "toc" (the PDF's embedded
+        bookmarks/outline) is empty for PDFs that don't have one — common
+        for scanned books or ones assembled by hand — in which case the
+        caller should fall back to a manual page-range picker using
+        "page_count".
+        """
+        return self.parser.get_toc_with_page_count(pdf_path)
+
+    def ingest_uploaded_pdf(
+        self,
+        pdf_path:   str,
+        book_title: str,
+        start_page: int,
+        end_page:   int,
+    ) -> IngestResult:
+        """
+        Ingests one page range of an arbitrary uploaded PDF as a "chapter".
+        Not from the NCERT catalog, so class_num/subject are synthesized
+        from the book title (class_num=0 is the "custom upload" sentinel;
+        subject is a slug of the title). Every other feature (flashcards,
+        notes, hot questions, ...) then works on it exactly like an NCERT
+        chapter — they only need class_num/subject/chapter.
+        """
+        class_num = 0
+        subject   = self.slugify(book_title)
+        chapter   = start_page  # not a real chapter number — a unique slot per page range
+        collection_name = self._collection_name(class_num, subject, chapter)
+
+        console.rule(f"[bold]Ingesting upload: {book_title} (pages {start_page}-{end_page})[/bold]")
+
+        chunks = self.parser.parse_and_chunk(
+            pdf_path, class_num, subject, chapter, page_range=(start_page, end_page)
+        )
+        self.store.add_chunks(chunks, collection_name)
+        self._ingested[collection_name] = {
+            "pdf_path": pdf_path,
+            "page_range": (start_page, end_page),
+        }
+
+        return IngestResult(
+            collection_name = collection_name,
+            class_num       = class_num,
+            subject         = subject,
+            chapter         = chapter,
+            pdf_path        = pdf_path,
+            num_chunks      = len(chunks),
+        )
