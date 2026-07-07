@@ -10,14 +10,16 @@ run and in what order based on the request type.
 Usage:
     agent = EduMindAgent()
 
-    # Full pipeline run (fetch → parse → embed → flashcards → highlights)
+    # Ingest once (fetch → parse → embed, no LLM calls)
+    agent.ingest_chapter(class_num=10, subject="science", chapter=3)
+
+    # Then run any feature independently, in any order
+    cards = agent.get_flashcards(class_num=10, subject="science", chapter=3)
+    tagged, key_terms = agent.generate_highlights(class_num=10, subject="science", chapter=3)
+    test = agent.generate_test(student_id="stu_001", class_num=10, subject="science", chapter=3)
+
+    # Or run the old one-shot bundle (ingest + flashcards + highlights)
     result = agent.process_chapter(class_num=10, subject="science", chapter=3)
-
-    # Generate a personalized test for a student
-    test = agent.generate_test(student_id="stu_001", ...)
-
-    # Just get flashcards from an already-indexed chapter
-    cards = agent.get_flashcards(collection_name="class10_science_ch03")
 """
 
 from dataclasses import dataclass, field
@@ -36,6 +38,17 @@ from pipeline.test_builder      import PersonalizedTest, StudentProfile, TestBui
 from pipeline.vector_store      import VectorStore
 
 console = Console()
+
+
+@dataclass
+class IngestResult:
+    """Result of fetching + parsing + embedding a chapter. No LLM calls."""
+    collection_name: str
+    class_num:       int
+    subject:         str
+    chapter:         int
+    pdf_path:        str
+    num_chunks:      int
 
 
 @dataclass
@@ -71,18 +84,54 @@ class EduMindAgent:
         console.print("[bold blue]🚀 EduMind Agent initializing...[/bold blue]")
         self.fetcher       = NCERTFetcher()
         self.parser        = PDFParser()
+        # One shared VectorStore (and its embedding model) reused by every
+        # generator below — avoids loading the embedding model 6 times.
         self.store         = VectorStore()
-        self.flashcard     = FlashcardGenerator()
+        self.flashcard     = FlashcardGenerator(store=self.store)
         self.tagger        = HighlightTagger()
-        self.test          = TestBuilder()
-        self.formula_sheet = FormulaSheetGenerator()
-        self.notes         = NotesGenerator()
-        self.hot_questions = HotQuestionsGenerator()
+        self.test          = TestBuilder(store=self.store)
+        self.formula_sheet = FormulaSheetGenerator(store=self.store)
+        self.notes         = NotesGenerator(store=self.store)
+        self.hot_questions = HotQuestionsGenerator(store=self.store)
         console.print("[green]✓ All pipeline components ready[/green]\n")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Core Workflows
     # ──────────────────────────────────────────────────────────────────────────
+
+    def ingest_chapter(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+    ) -> IngestResult:
+        """
+        Fetch → parse → embed a chapter. No LLM calls — this step is free
+        and fast (PDF fetch and parsing are cached/local after the first
+        run). Every content-generation feature (flashcards, highlights,
+        notes, hot questions, formula sheet, tests) requires this to have
+        run first for the chapter.
+        """
+        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        console.rule(f"[bold]Ingesting: Class {class_num} | {subject} | Ch.{chapter}[/bold]")
+
+        pdf_path = self.fetcher.fetch(class_num, subject, chapter)
+        chunks   = self.parser.parse_and_chunk(pdf_path, class_num, subject, chapter)
+        self.store.add_chunks(chunks, collection_name)
+
+        return IngestResult(
+            collection_name = collection_name,
+            class_num       = class_num,
+            subject         = subject,
+            chapter         = chapter,
+            pdf_path        = pdf_path,
+            num_chunks      = len(chunks),
+        )
+
+    def is_ingested(self, class_num: int, subject: str, chapter: int) -> bool:
+        """Whether a chapter has already been fetched, parsed, and embedded."""
+        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        return self.store.collection_exists(collection_name)
 
     def process_chapter(
         self,
@@ -93,65 +142,53 @@ class EduMindAgent:
         num_flashcards: int  = 15,
     ) -> ChapterResult:
         """
-        Full pipeline for a single NCERT chapter:
-          1. Fetch PDF from ncert.nic.in (cached after first run)
-          2. Parse and chunk the text
-          3. Embed chunks → ChromaDB
-          4. Generate flashcards via RAG
-          5. Tag chunks with importance levels (optional)
-
-        Args:
-            class_num            : 6–12
-            subject              : e.g. "science", "chemistry_1"
-            chapter              : chapter number
-            generate_highlights  : run highlight tagger (costs extra LLM calls)
-            num_flashcards       : how many flashcards to generate
-
-        Returns:
-            ChapterResult with flashcards, tagged chunks, key terms
+        Convenience wrapper for a one-shot run: ingest + flashcards (+
+        highlights). Kept for the CLI demo — for a UI where each feature
+        runs independently, call ingest_chapter() once, then any of the
+        generate_*() methods on demand.
         """
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
-        console.rule(f"[bold]Processing: Class {class_num} | {subject} | Ch.{chapter}[/bold]")
+        ingest = self.ingest_chapter(class_num, subject, chapter)
 
-        # ── Step 1: Fetch NCERT PDF ───────────────────────────────────────────
-        pdf_path = self.fetcher.fetch(class_num, subject, chapter)
-
-        # ── Step 2: Parse + Chunk ─────────────────────────────────────────────
-        chunks = self.parser.parse_and_chunk(pdf_path, class_num, subject, chapter)
-
-        # ── Step 3: Embed → Vector DB ─────────────────────────────────────────
-        self.store.add_chunks(chunks, collection_name)
-
-        # ── Step 4: Generate Flashcards ───────────────────────────────────────
         flashcards = self.flashcard.generate(
-            collection_name = collection_name,
+            collection_name = ingest.collection_name,
             subject         = subject,
             chapter         = chapter,
             class_num       = class_num,
             n               = num_flashcards,
         )
 
-        # ── Step 5: Highlight Tagging (optional) ──────────────────────────────
-        tagged_chunks = []
-        key_terms     = []
+        tagged_chunks: list[TaggedChunk] = []
+        key_terms:     list[str]         = []
         if generate_highlights:
-            tagged_chunks = self.tagger.tag(chunks)
-            key_terms     = self.tagger.get_key_terms(tagged_chunks)
+            tagged_chunks, key_terms = self._tag_chapter(class_num, subject, chapter)
 
         result = ChapterResult(
-            collection_name = collection_name,
+            collection_name = ingest.collection_name,
             class_num       = class_num,
             subject         = subject,
             chapter         = chapter,
             flashcards      = flashcards,
             tagged_chunks   = tagged_chunks,
             key_terms       = key_terms,
-            pdf_path        = pdf_path,
+            pdf_path        = ingest.pdf_path,
         )
 
         console.print(f"\n[bold green]✅ Done![/bold green]")
         console.print(result.summary())
         return result
+
+    def generate_highlights(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+    ) -> tuple[list[TaggedChunk], list[str]]:
+        """
+        Tags an already-ingested chapter's chunks with importance levels
+        and extracts key terms. Can be run independently of flashcards.
+        """
+        self._require_indexed(class_num, subject, chapter)
+        return self._tag_chapter(class_num, subject, chapter)
 
     def generate_test(
         self,
@@ -295,7 +332,17 @@ class EduMindAgent:
         collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
         if not self.store.collection_exists(collection_name):
             raise RuntimeError(
-                f"Chapter not indexed yet. Run process_chapter() first.\n"
+                f"Chapter not indexed yet. Run ingest_chapter() first.\n"
                 f"Collection: {collection_name}"
             )
         return collection_name
+
+    def _tag_chapter(
+        self, class_num: int, subject: str, chapter: int
+    ) -> tuple[list[TaggedChunk], list[str]]:
+        """Re-parses the cached PDF (fast, no network) and tags its chunks."""
+        pdf_path      = self.fetcher.fetch(class_num, subject, chapter)
+        chunks        = self.parser.parse_and_chunk(pdf_path, class_num, subject, chapter)
+        tagged_chunks = self.tagger.tag(chunks)
+        key_terms     = self.tagger.get_key_terms(tagged_chunks)
+        return tagged_chunks, key_terms

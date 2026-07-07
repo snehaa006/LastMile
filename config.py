@@ -5,6 +5,7 @@ load_dotenv()
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
@@ -14,7 +15,14 @@ PYQ_PATH        = os.path.join(BASE_DIR, "data", "pyqs")
 
 # ── Model Settings ────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # local, no API needed
-LLM_MODEL       = "claude-sonnet-4-6"
+
+# LLM_PROVIDER selects which LLM backend pipeline/llm_client.py talks to.
+#   "gemini"    → Google Gemini API (has a free tier — good default for dev)
+#   "anthropic" → Claude API (higher quality, no free tier, pay-per-token)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
+
+GEMINI_MODEL = "gemini-2.5-flash"      # free-tier eligible
+LLM_MODEL    = "claude-sonnet-4-6"     # used only when LLM_PROVIDER="anthropic"
 
 # ── Chunking ──────────────────────────────────────────────────────────────────
 CHUNK_SIZE    = 600   # characters per chunk

@@ -18,11 +18,11 @@ Usage:
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Optional
 
-import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, LLM_MODEL
+from pipeline.llm_client import LLMClient
 from pipeline.vector_store import VectorStore
 
 console = Console()
@@ -70,9 +70,9 @@ class PersonalizedTest:
 
 class TestBuilder:
 
-    def __init__(self):
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        self._store  = VectorStore()
+    def __init__(self, store: Optional[VectorStore] = None):
+        self._client = LLMClient()
+        self._store  = store or VectorStore()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -265,12 +265,7 @@ NCERT Content:
 {context[:3000]}
 """
 
-        message = self._client.messages.create(
-            model      = LLM_MODEL,
-            max_tokens = 2048,
-            messages   = [{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text
+        raw = self._client.complete(prompt, max_tokens=2048)
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
 
         try:

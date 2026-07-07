@@ -18,11 +18,11 @@ Usage:
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Optional
 
-import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, LLM_MODEL
+from pipeline.llm_client import LLMClient
 from pipeline.vector_store import VectorStore
 
 console = Console()
@@ -60,9 +60,9 @@ class ChapterNotes:
 
 class NotesGenerator:
 
-    def __init__(self):
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        self._store  = VectorStore()
+    def __init__(self, store: Optional[VectorStore] = None):
+        self._client = LLMClient()
+        self._store  = store or VectorStore()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -131,12 +131,7 @@ Format:
 NCERT Content:
 {context}
 """
-        message = self._client.messages.create(
-            model      = LLM_MODEL,
-            max_tokens = 4096,
-            messages   = [{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text
+        return self._client.complete(prompt, max_tokens=4096)
 
     def _parse(self, raw: str, subject: str, chapter: int, class_num: int) -> ChapterNotes:
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
