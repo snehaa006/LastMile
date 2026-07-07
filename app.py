@@ -150,55 +150,122 @@ except RuntimeError as e:
     )
     st.stop()
 
-# ── Chapter picker ────────────────────────────────────────────────────────
-st.sidebar.header("1. Pick a chapter")
-class_num = st.sidebar.selectbox("Class", sorted(NCERT_CODES.keys()), index=4)
-subjects  = list(NCERT_CODES.get(class_num, {}).keys())
-subject   = st.sidebar.selectbox("Subject", subjects)
-chapter   = st.sidebar.number_input("Chapter", min_value=1, max_value=30, value=1, step=1)
+# ── Source picker: NCERT catalog or an uploaded PDF ─────────────────────────
+st.sidebar.header("1. Pick a source")
+source_mode = st.sidebar.radio("Source", ["NCERT Catalog", "Upload your own PDF"], key="source_mode")
 
-collection_name  = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
-already_ingested = agent.is_ingested(class_num, subject, chapter)
+class_num = subject = chapter = collection_name = book_title = None
+upload_pdf_path = upload_start_page = upload_end_page = None
+ready_to_generate = False
+
+if source_mode == "NCERT Catalog":
+    class_num = st.sidebar.selectbox("Class", sorted(NCERT_CODES.keys()), index=4)
+    subjects  = list(NCERT_CODES.get(class_num, {}).keys())
+    subject   = st.sidebar.selectbox("Subject", subjects)
+    chapter   = st.sidebar.number_input("Chapter", min_value=1, max_value=30, value=1, step=1)
+    collection_name   = agent.collection_name(class_num, subject, chapter)
+    ready_to_generate = True
+
+else:  # Upload your own PDF
+    uploaded_file = st.sidebar.file_uploader("Upload a PDF", type=["pdf"])
+    if uploaded_file is None:
+        st.sidebar.info("Upload a PDF to continue.")
+    else:
+        default_title = uploaded_file.name.rsplit(".", 1)[0]
+        book_title = st.sidebar.text_input("Book title", value=default_title, key="upload_title")
+
+        # Save to disk once per unique upload — not on every rerun
+        save_cache_key = f"upload_path::{uploaded_file.name}::{uploaded_file.size}"
+        if save_cache_key not in st.session_state:
+            st.session_state[save_cache_key] = agent.save_uploaded_pdf(
+                uploaded_file.getvalue(), uploaded_file.name
+            )
+        upload_pdf_path = st.session_state[save_cache_key]
+
+        # Detect chapters once per file — parsing the whole PDF isn't free
+        detect_cache_key = f"detected::{upload_pdf_path}"
+        if detect_cache_key not in st.session_state:
+            st.session_state[detect_cache_key] = agent.detect_chapters(upload_pdf_path)
+        detected = st.session_state[detect_cache_key]
+        toc, page_count = detected["toc"], detected["page_count"]
+
+        if toc:
+            st.sidebar.caption(f"Found {len(toc)} chapters in this PDF's table of contents.")
+            option_labels = [f"{e['title']} (p.{e['start_page']}–{e['end_page']})" for e in toc]
+            chosen_idx = st.sidebar.selectbox(
+                "Chapter", range(len(toc)), format_func=lambda i: option_labels[i]
+            )
+            upload_start_page = toc[chosen_idx]["start_page"]
+            upload_end_page   = toc[chosen_idx]["end_page"]
+        else:
+            st.sidebar.caption(
+                f"No table of contents found in this PDF ({page_count} pages) — "
+                f"pick the page range for this chapter manually."
+            )
+            upload_start_page = st.sidebar.number_input(
+                "Start page", min_value=1, max_value=page_count, value=1
+            )
+            upload_end_page = st.sidebar.number_input(
+                "End page", min_value=1, max_value=page_count, value=min(10, page_count)
+            )
+            if upload_end_page < upload_start_page:
+                st.sidebar.error("End page must be ≥ start page.")
+
+        if book_title.strip() and upload_end_page and upload_end_page >= upload_start_page:
+            class_num = 0
+            subject   = agent.slugify(book_title)
+            chapter   = upload_start_page
+            collection_name   = agent.collection_name(class_num, subject, chapter)
+            ready_to_generate = True
 
 st.sidebar.markdown("---")
 st.sidebar.header("2. Generate")
 st.sidebar.caption(
-    "Fetches the chapter (if needed) and runs flashcards, highlights, "
+    "Fetches/indexes the chapter (if needed) and runs flashcards, highlights, "
     "notes, hot questions, and a formula sheet — all in parallel."
 )
 
-if st.sidebar.button("🚀 Fetch, Index & Generate Everything", type="primary", use_container_width=True):
-    with st.spinner("Fetching + indexing..."):
-        try:
-            agent.ingest_chapter(class_num, subject, chapter)
-        except Exception as e:
-            st.sidebar.error(f"Ingest failed: {e}")
-            st.stop()
-    with st.spinner("Running all generators in parallel — this calls the LLM 5 times at once..."):
-        results = agent.generate_all(class_num, subject, chapter)
-        failed = []
-        for orch_key, value in results.items():
-            cache_key = ORCH_TO_CACHE_KEY[orch_key]
-            if isinstance(value, Exception):
-                failed.append((orch_key, value))
-                continue
-            st.session_state[result_key(cache_key, collection_name)] = value
-        if failed:
-            for name, err in failed:
-                st.sidebar.error(f"{name} failed: {err}")
-        st.sidebar.success(f"Done — {len(results) - len(failed)}/{len(results)} features generated.")
-        st.rerun()
+already_ingested = ready_to_generate and agent.is_ingested(class_num, subject, chapter)
 
-if already_ingested:
-    st.sidebar.success(f"Indexed: `{collection_name}`")
-else:
-    st.sidebar.warning("Not indexed yet — click the button above.")
+if ready_to_generate:
+    if st.sidebar.button("🚀 Fetch, Index & Generate Everything", type="primary", use_container_width=True):
+        with st.spinner("Fetching + indexing..."):
+            try:
+                if source_mode == "NCERT Catalog":
+                    agent.ingest_chapter(class_num, subject, chapter)
+                else:
+                    agent.ingest_uploaded_pdf(upload_pdf_path, book_title, upload_start_page, upload_end_page)
+            except Exception as e:
+                st.sidebar.error(f"Ingest failed: {e}")
+                st.stop()
+        with st.spinner("Running all generators in parallel — this calls the LLM 5 times at once..."):
+            results = agent.generate_all(class_num, subject, chapter)
+            failed = []
+            for orch_key, value in results.items():
+                cache_key = ORCH_TO_CACHE_KEY[orch_key]
+                if isinstance(value, Exception):
+                    failed.append((orch_key, value))
+                    continue
+                st.session_state[result_key(cache_key, collection_name)] = value
+            if failed:
+                for name, err in failed:
+                    st.sidebar.error(f"{name} failed: {err}")
+            st.sidebar.success(f"Done — {len(results) - len(failed)}/{len(results)} features generated.")
+            st.rerun()
+
+    if already_ingested:
+        st.sidebar.success(f"Indexed: `{collection_name}`")
+    else:
+        st.sidebar.warning("Not indexed yet — click the button above.")
 
 if not already_ingested:
-    st.info("👈 Pick a chapter and click **Fetch, Index & Generate Everything** in the sidebar.")
+    st.info("👈 Pick a chapter (or upload a PDF) and click **Fetch, Index & Generate Everything** in the sidebar.")
     st.stop()
 
-st.caption(f"Working on **Class {class_num} · {subject.title()} · Chapter {chapter}** (`{collection_name}`)")
+if source_mode == "NCERT Catalog":
+    st.caption(f"Working on **Class {class_num} · {subject.title()} · Chapter {chapter}** (`{collection_name}`)")
+else:
+    st.caption(f"Working on **{book_title}** · pages {upload_start_page}–{upload_end_page} (`{collection_name}`)")
 
 # ── Chapter overview — status cards ─────────────────────────────────────────
 overview_features = [

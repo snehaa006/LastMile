@@ -172,6 +172,37 @@ python main.py
 | 11    | physics_1/2, chemistry_1/2, biology, mathematics, economics, accountancy_1/2, business, history, political_sci |
 | 12    | physics_1/2, chemistry_1/2, biology, mathematics_1/2, economics, accountancy_1/2, business, history_1, political_sci |
 
+## Using Your Own PDF
+
+The dashboard isn't limited to the NCERT catalog — switch the sidebar's
+**Source** to "Upload your own PDF" to run the pipeline on any book you
+already have as a PDF:
+
+1. Upload the file and give it a title.
+2. If the PDF has an embedded table of contents (most published books do),
+   the dashboard reads it and gives you a chapter dropdown automatically.
+3. If it doesn't (common for scanned or hand-assembled PDFs), you pick the
+   page range for the chapter manually instead.
+4. From there it behaves exactly like an NCERT chapter — same flashcards,
+   notes, highlights, hot questions, formula sheet, and tests.
+
+Under the hood this reuses the entire existing pipeline: uploads get a
+synthesized `class_num=0` / `subject=slug(title)` identity so every
+generator (which only cares about those three values, not where the PDF
+came from) works unchanged. `pipeline/pdf_parser.py`'s `get_toc_with_page_count()`
+does the chapter detection via PyMuPDF's outline API; `parse_and_chunk()`
+takes an optional `page_range` to restrict parsing to just that chapter.
+
+**On "can we download more books automatically":** the honest boundary
+here is that this only handles PDFs you already legally have — it does not,
+and won't, scrape or auto-download copyrighted textbooks from arbitrary
+sites. NCERT is a special case because the Indian government publishes it
+as free, open educational content; most other textbooks aren't. If there
+are other *specific* open educational sources (another government/state
+board site that publishes free PDFs the way NCERT does) you want added as
+a structured catalog like the NCERT one, name them and that's a reasonable,
+legitimate addition — a generic "find and download any book" scraper isn't.
+
 ## Quick Usage
 
 ```python

@@ -12,3 +12,6 @@ venv/
 data/ncert_pdfs/*.pdf
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+
+# User-uploaded PDFs — never commit someone's book
+data/uploads/*.pdf
