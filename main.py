@@ -68,6 +68,41 @@ def print_highlights(tagged_chunks, n=3):
         )
 
 
+def print_notes(notes, n=3):
+    console.print(Panel(notes.tldr, title="TL;DR", border_style="magenta"))
+    for section in notes.sections[:n]:
+        bullets = "\n".join(f"  • {b}" for b in section.bullets)
+        console.print(Panel(bullets, title=section.heading, border_style="magenta"))
+
+
+def print_hot_questions(questions, n=5):
+    table = Table(title=f"Hot Questions (showing {n})", show_lines=True)
+    table.add_column("Q", style="cyan", width=40)
+    table.add_column("Likelihood", style="red", width=10)
+    table.add_column("Basis", style="dim", width=25)
+    table.add_column("Source", style="green", width=12)
+
+    for q in questions[:n]:
+        table.add_row(q.question, q.likelihood, q.basis, q.source)
+
+    console.print(table)
+
+
+def print_formula_sheet(sheet, n=5):
+    if not sheet.entries:
+        console.print("[dim]No formulas found for this chapter.[/dim]")
+        return
+    table = Table(title=f"Formula Sheet (showing {n})", show_lines=True)
+    table.add_column("Name", style="cyan", width=20)
+    table.add_column("Expression", style="white", width=25)
+    table.add_column("When to use", style="yellow", width=30)
+
+    for f in sheet.entries[:n]:
+        table.add_row(f.name, f.expression, f.when_to_use)
+
+    console.print(table)
+
+
 def main():
     console.print(
         Panel.fit(
@@ -132,6 +167,21 @@ def main():
     )
     for i, r in enumerate(results, 1):
         console.print(Panel(r[:400], title=f"Result {i}", border_style="cyan"))
+
+    # ── Step 6: Revision Notes ────────────────────────────────────────────────
+    console.rule("[bold]STEP 6: Revision Notes[/bold]")
+    notes = agent.generate_notes(class_num=CLASS_NUM, subject=SUBJECT, chapter=CHAPTER)
+    print_notes(notes, n=3)
+
+    # ── Step 7: Hot Questions ─────────────────────────────────────────────────
+    console.rule("[bold]STEP 7: Hot Questions[/bold]")
+    hot = agent.get_hot_questions(class_num=CLASS_NUM, subject=SUBJECT, chapter=CHAPTER, n=10)
+    print_hot_questions(hot, n=5)
+
+    # ── Step 8: Formula Sheet (math/science) ──────────────────────────────────
+    console.rule("[bold]STEP 8: Formula Sheet[/bold]")
+    sheet = agent.generate_formula_sheet(class_num=CLASS_NUM, subject=SUBJECT, chapter=CHAPTER)
+    print_formula_sheet(sheet, n=5)
 
     console.print("\n[bold green]✅ Pipeline demo complete![/bold green]")
 

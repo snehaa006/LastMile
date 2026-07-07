@@ -25,12 +25,15 @@ from typing import Optional
 
 from rich.console import Console
 
-from pipeline.flashcard_gen  import Flashcard, FlashcardGenerator
-from pipeline.highlight_tagger import HighlightTagger, TaggedChunk
-from pipeline.ncert_fetcher   import NCERTFetcher
-from pipeline.pdf_parser      import PDFParser
-from pipeline.test_builder    import PersonalizedTest, StudentProfile, TestBuilder
-from pipeline.vector_store    import VectorStore
+from pipeline.flashcard_gen     import Flashcard, FlashcardGenerator
+from pipeline.formula_sheet_gen import FormulaSheet, FormulaSheetGenerator
+from pipeline.highlight_tagger  import HighlightTagger, TaggedChunk
+from pipeline.hot_questions_gen import HotQuestion, HotQuestionsGenerator
+from pipeline.ncert_fetcher     import NCERTFetcher
+from pipeline.notes_gen         import ChapterNotes, NotesGenerator
+from pipeline.pdf_parser        import PDFParser
+from pipeline.test_builder      import PersonalizedTest, StudentProfile, TestBuilder
+from pipeline.vector_store      import VectorStore
 
 console = Console()
 
@@ -66,12 +69,15 @@ class EduMindAgent:
 
     def __init__(self):
         console.print("[bold blue]🚀 EduMind Agent initializing...[/bold blue]")
-        self.fetcher    = NCERTFetcher()
-        self.parser     = PDFParser()
-        self.store      = VectorStore()
-        self.flashcard  = FlashcardGenerator()
-        self.tagger     = HighlightTagger()
-        self.test       = TestBuilder()
+        self.fetcher       = NCERTFetcher()
+        self.parser        = PDFParser()
+        self.store         = VectorStore()
+        self.flashcard     = FlashcardGenerator()
+        self.tagger        = HighlightTagger()
+        self.test          = TestBuilder()
+        self.formula_sheet = FormulaSheetGenerator()
+        self.notes         = NotesGenerator()
+        self.hot_questions = HotQuestionsGenerator()
         console.print("[green]✓ All pipeline components ready[/green]\n")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -172,13 +178,7 @@ class EduMindAgent:
         Returns:
             PersonalizedTest
         """
-        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
-
-        if not self.store.collection_exists(collection_name):
-            raise RuntimeError(
-                f"Chapter not indexed yet. Run process_chapter() first.\n"
-                f"Collection: {collection_name}"
-            )
+        collection_name = self._require_indexed(class_num, subject, chapter)
 
         profile = StudentProfile(
             student_id    = student_id,
@@ -231,3 +231,71 @@ class EduMindAgent:
         collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
         results = self.store.query(query, collection_name, top_k=top_k)
         return [r.text for r in results]
+
+    def generate_formula_sheet(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+    ) -> FormulaSheet:
+        """
+        Builds a consolidated formula sheet for an already-indexed chapter.
+        Most useful for mathematics and formula-heavy science chapters;
+        returns an empty sheet for purely descriptive chapters.
+        """
+        collection_name = self._require_indexed(class_num, subject, chapter)
+        return self.formula_sheet.generate(
+            collection_name = collection_name,
+            subject         = subject,
+            chapter         = chapter,
+            class_num       = class_num,
+        )
+
+    def generate_notes(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+    ) -> ChapterNotes:
+        """Builds condensed revision notes for an already-indexed chapter."""
+        collection_name = self._require_indexed(class_num, subject, chapter)
+        return self.notes.generate(
+            collection_name = collection_name,
+            subject         = subject,
+            chapter         = chapter,
+            class_num       = class_num,
+        )
+
+    def get_hot_questions(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+        n:         int = 10,
+    ) -> list[HotQuestion]:
+        """
+        Returns the ranked list of questions most likely to appear in the
+        exam for an already-indexed chapter, blending PYQ repetition with
+        LLM-predicted high-yield questions.
+        """
+        collection_name = self._require_indexed(class_num, subject, chapter)
+        return self.hot_questions.generate(
+            collection_name = collection_name,
+            subject         = subject,
+            chapter         = chapter,
+            class_num       = class_num,
+            n               = n,
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Internal Helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _require_indexed(self, class_num: int, subject: str, chapter: int) -> str:
+        collection_name = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
+        if not self.store.collection_exists(collection_name):
+            raise RuntimeError(
+                f"Chapter not indexed yet. Run process_chapter() first.\n"
+                f"Collection: {collection_name}"
+            )
+        return collection_name
