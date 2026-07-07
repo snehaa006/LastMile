@@ -1,14 +1,16 @@
 """
 app.py — EduMind Dashboard
 ─────────────────────────────
-Streamlit UI for the EduMind pipeline. Pick a class/subject/chapter, fetch
-and index it, then run any feature independently — nothing runs unless you
-click its button.
+Streamlit UI for the EduMind pipeline. Pick a class/subject/chapter, then
+one click fetches, indexes, and generates flashcards, highlights, notes,
+hot questions, and a formula sheet — all in parallel. Each tab also has
+its own regenerate button if you want to refresh just one feature.
 
 Run:
     streamlit run app.py
 """
 
+import html
 import os
 
 import streamlit as st
@@ -29,6 +31,95 @@ from config import NCERT_CODES
 
 st.set_page_config(page_title="EduMind Dashboard", page_icon="📚", layout="wide")
 
+THEME_CSS = """
+<style>
+.block-container { padding-top: 2rem; max-width: 1200px; }
+
+.em-card {
+    background: #FFFFFF;
+    border: 1px solid #E8DFD3;
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    margin-bottom: .8rem;
+}
+.em-card h4 { margin: 0 0 .4rem 0; font-size: 1rem; }
+.em-status-done { color: #1A7A3C; font-weight: 600; font-size: .9rem; }
+.em-status-pending { color: #9A9284; font-size: .9rem; }
+
+.em-callout {
+    border-radius: 8px;
+    padding: .85rem 1.1rem;
+    margin: .7rem 0;
+}
+.em-label {
+    font-size: .7rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: .25rem;
+    display: block;
+}
+.em-tldr      { background: #FFF4E3; border-left: 4px solid #D98E36; }
+.em-tldr .em-label      { color: #B06A1B; }
+.em-bigidea   { background: #FFF4E3; border-left: 4px solid #D98E36; }
+.em-bigidea .em-label   { color: #B06A1B; }
+.em-definition{ background: #F5F0E8; border-left: 4px solid #C1622F; }
+.em-definition .em-label{ color: #C1622F; }
+.em-formula   { background: #FDF8EF; border: 1px solid #E8DFD3; border-left: 4px solid #2B2521;
+                font-family: "SFMono-Regular", Consolas, monospace; }
+.em-formula .em-label   { font-family: sans-serif; color: #2B2521; }
+.em-example   { background: #FBEDE3; border-left: 4px solid #C1622F; }
+.em-example .em-label   { color: #C1622F; }
+
+.em-table { width: 100%; border-collapse: collapse; margin: .5rem 0 1.1rem 0; font-size: .92rem; }
+.em-table th { background: #2B2521; color: #FFFFFF; text-align: left; padding: .5rem .7rem; }
+.em-table td { padding: .5rem .7rem; border-bottom: 1px solid #E8DFD3; }
+.em-table tr:nth-child(even) td { background: #FBF7F0; }
+.em-table-title { font-weight: 600; margin: .3rem 0 .2rem 0; }
+
+.em-section-heading { margin-top: 1.6rem; margin-bottom: .2rem; }
+</style>
+"""
+st.markdown(THEME_CSS, unsafe_allow_html=True)
+
+
+def esc(text: str) -> str:
+    return html.escape(text or "")
+
+
+def render_callout(css_class: str, label: str, content: str) -> None:
+    st.markdown(
+        f'<div class="em-callout {css_class}">'
+        f'<span class="em-label">{esc(label)}</span>{esc(content)}'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_block(block) -> None:
+    if block.type == "definition":
+        render_callout("em-definition", f"Definition — {block.title}", block.content)
+    elif block.type == "formula":
+        render_callout("em-formula", f"Formula — {block.title}", block.content)
+    elif block.type == "example":
+        render_callout("em-example", f"Example — {block.title}", block.content)
+    elif block.type == "bullets" and block.items:
+        items_html = "".join(f"<li>{esc(i)}</li>" for i in block.items)
+        st.markdown(f"<ul>{items_html}</ul>", unsafe_allow_html=True)
+    elif block.type == "table" and block.table_rows:
+        if block.title:
+            st.markdown(f'<div class="em-table-title">{esc(block.title)}</div>', unsafe_allow_html=True)
+        header_html = "".join(f"<th>{esc(h)}</th>" for h in block.table_headers)
+        rows_html = "".join(
+            "<tr>" + "".join(f"<td>{esc(str(c))}</td>" for c in row) + "</tr>"
+            for row in block.table_rows
+        )
+        st.markdown(
+            f"<table class='em-table'><thead><tr>{header_html}</tr></thead>"
+            f"<tbody>{rows_html}</tbody></table>",
+            unsafe_allow_html=True,
+        )
+
 
 @st.cache_resource(show_spinner="Initializing EduMind agent (loading embedding model)...")
 def get_agent() -> EduMindAgent:
@@ -38,6 +129,15 @@ def get_agent() -> EduMindAgent:
 def result_key(feature: str, collection_name: str) -> str:
     return f"{feature}::{collection_name}"
 
+
+# Maps orchestrator's generate_all() result keys to this file's per-tab cache keys
+ORCH_TO_CACHE_KEY = {
+    "flashcards": "flash",
+    "highlights": "highlight",
+    "notes": "notes",
+    "hot_questions": "hot",
+    "formula_sheet": "formula",
+}
 
 st.title("📚 EduMind — CBSE Study Dashboard")
 
@@ -61,28 +161,64 @@ collection_name  = f"class{class_num}_{subject}_ch{str(chapter).zfill(2)}"
 already_ingested = agent.is_ingested(class_num, subject, chapter)
 
 st.sidebar.markdown("---")
-st.sidebar.header("2. Fetch & index")
+st.sidebar.header("2. Generate")
+st.sidebar.caption(
+    "Fetches the chapter (if needed) and runs flashcards, highlights, "
+    "notes, hot questions, and a formula sheet — all in parallel."
+)
+
+if st.sidebar.button("🚀 Fetch, Index & Generate Everything", type="primary", use_container_width=True):
+    with st.spinner("Fetching + indexing..."):
+        try:
+            agent.ingest_chapter(class_num, subject, chapter)
+        except Exception as e:
+            st.sidebar.error(f"Ingest failed: {e}")
+            st.stop()
+    with st.spinner("Running all generators in parallel — this calls the LLM 5 times at once..."):
+        results = agent.generate_all(class_num, subject, chapter)
+        failed = []
+        for orch_key, value in results.items():
+            cache_key = ORCH_TO_CACHE_KEY[orch_key]
+            if isinstance(value, Exception):
+                failed.append((orch_key, value))
+                continue
+            st.session_state[result_key(cache_key, collection_name)] = value
+        if failed:
+            for name, err in failed:
+                st.sidebar.error(f"{name} failed: {err}")
+        st.sidebar.success(f"Done — {len(results) - len(failed)}/{len(results)} features generated.")
+        st.rerun()
+
 if already_ingested:
     st.sidebar.success(f"Indexed: `{collection_name}`")
 else:
-    st.sidebar.warning("Not indexed yet")
-
-if st.sidebar.button("📥 Fetch & Index Chapter", type="primary", use_container_width=True):
-    with st.spinner("Downloading PDF, parsing, embedding — no LLM calls, this is free..."):
-        try:
-            ingest = agent.ingest_chapter(class_num, subject, chapter)
-            st.sidebar.success(f"Indexed {ingest.num_chunks} chunks from {ingest.pdf_path}")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Failed: {e}")
+    st.sidebar.warning("Not indexed yet — click the button above.")
 
 if not already_ingested:
-    st.info("👈 Fetch & index a chapter first using the sidebar. This step is free — no LLM calls.")
+    st.info("👈 Pick a chapter and click **Fetch, Index & Generate Everything** in the sidebar.")
     st.stop()
 
 st.caption(f"Working on **Class {class_num} · {subject.title()} · Chapter {chapter}** (`{collection_name}`)")
 
-# ── Feature tabs — each one is independent, nothing runs until you click it ─
+# ── Chapter overview — status cards ─────────────────────────────────────────
+overview_features = [
+    ("flash", "🃏 Flashcards"),
+    ("highlight", "🔍 Highlights"),
+    ("notes", "📓 Notes"),
+    ("hot", "🔥 Hot Questions"),
+    ("formula", "Σ Formula Sheet"),
+]
+cols = st.columns(len(overview_features))
+for col, (key, label) in zip(cols, overview_features):
+    done = result_key(key, collection_name) in st.session_state
+    status_html = (
+        '<span class="em-status-done">✓ Generated</span>'
+        if done
+        else '<span class="em-status-pending">Not yet</span>'
+    )
+    col.markdown(f'<div class="em-card"><h4>{label}</h4>{status_html}</div>', unsafe_allow_html=True)
+
+# ── Feature tabs — each also has its own regenerate button ─────────────────
 tab_flash, tab_highlight, tab_notes, tab_hot, tab_formula, tab_test, tab_search = st.tabs(
     ["🃏 Flashcards", "🔍 Highlights", "📓 Notes", "🔥 Hot Questions", "Σ Formula Sheet", "📝 Test", "🔎 Search"]
 )
@@ -90,7 +226,7 @@ tab_flash, tab_highlight, tab_notes, tab_hot, tab_formula, tab_test, tab_search 
 # ── Flashcards ───────────────────────────────────────────────────────────
 with tab_flash:
     n = st.slider("Number of flashcards", 5, 30, 15, key="flash_n")
-    if st.button("Generate Flashcards", key="btn_flash"):
+    if st.button("Regenerate Flashcards", key="btn_flash"):
         with st.spinner("Calling LLM..."):
             try:
                 cards = agent.get_flashcards(class_num, subject, chapter, n=n)
@@ -104,10 +240,12 @@ with tab_flash:
             [{"Q": c.question, "A": c.answer, "Difficulty": c.difficulty, "Topic": c.topic} for c in cards],
             use_container_width=True,
         )
+    else:
+        st.caption("Not generated yet.")
 
 # ── Highlights ───────────────────────────────────────────────────────────
 with tab_highlight:
-    if st.button("Generate Highlights", key="btn_highlight"):
+    if st.button("Regenerate Highlights", key="btn_highlight"):
         with st.spinner("Calling LLM..."):
             try:
                 tagged, key_terms = agent.generate_highlights(class_num, subject, chapter)
@@ -127,10 +265,12 @@ with tab_highlight:
                 st.write(c.text)
                 if c.key_terms:
                     st.caption("Key terms: " + ", ".join(c.key_terms))
+    else:
+        st.caption("Not generated yet.")
 
 # ── Notes ────────────────────────────────────────────────────────────────
 with tab_notes:
-    if st.button("Generate Notes", key="btn_notes"):
+    if st.button("Regenerate Notes", key="btn_notes"):
         with st.spinner("Calling LLM..."):
             try:
                 notes = agent.generate_notes(class_num, subject, chapter)
@@ -141,16 +281,20 @@ with tab_notes:
     notes = st.session_state.get(result_key("notes", collection_name))
     if notes:
         if notes.tldr:
-            st.info(notes.tldr)
+            render_callout("em-tldr", "TL;DR", notes.tldr)
         for section in notes.sections:
-            st.subheader(section.heading)
-            for b in section.bullets:
-                st.markdown(f"- {b}")
+            st.markdown(f'<h4 class="em-section-heading">{esc(section.heading)}</h4>', unsafe_allow_html=True)
+            if section.big_idea:
+                render_callout("em-bigidea", "Big Idea", section.big_idea)
+            for block in section.blocks:
+                render_block(block)
+    else:
+        st.caption("Not generated yet.")
 
 # ── Hot Questions ────────────────────────────────────────────────────────
 with tab_hot:
     n_hot = st.slider("Number of hot questions", 5, 20, 10, key="hot_n")
-    if st.button("Generate Hot Questions", key="btn_hot"):
+    if st.button("Regenerate Hot Questions", key="btn_hot"):
         with st.spinner("Calling LLM..."):
             try:
                 hot = agent.get_hot_questions(class_num, subject, chapter, n=n_hot)
@@ -173,10 +317,12 @@ with tab_hot:
             ],
             use_container_width=True,
         )
+    else:
+        st.caption("Not generated yet.")
 
 # ── Formula Sheet ────────────────────────────────────────────────────────
 with tab_formula:
-    if st.button("Generate Formula Sheet", key="btn_formula"):
+    if st.button("Regenerate Formula Sheet", key="btn_formula"):
         with st.spinner("Calling LLM..."):
             try:
                 sheet = agent.generate_formula_sheet(class_num, subject, chapter)
@@ -202,6 +348,8 @@ with tab_formula:
                 ],
                 use_container_width=True,
             )
+    else:
+        st.caption("Not generated yet.")
 
 # ── Personalized Test ────────────────────────────────────────────────────
 with tab_test:
@@ -245,6 +393,8 @@ with tab_test:
                 st.caption(f"Answer: {q.answer}")
                 if q.hint:
                     st.caption(f"Hint: {q.hint}")
+    else:
+        st.caption("Fill in a student profile above and click Generate Test.")
 
 # ── Semantic Search (free — no LLM calls) ────────────────────────────────
 with tab_search:

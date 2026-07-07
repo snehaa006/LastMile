@@ -18,10 +18,15 @@ Usage:
     tagged, key_terms = agent.generate_highlights(class_num=10, subject="science", chapter=3)
     test = agent.generate_test(student_id="stu_001", class_num=10, subject="science", chapter=3)
 
+    # ...or run flashcards/highlights/notes/hot-questions/formula-sheet all
+    # at once, concurrently
+    results = agent.generate_all(class_num=10, subject="science", chapter=3)
+
     # Or run the old one-shot bundle (ingest + flashcards + highlights)
     result = agent.process_chapter(class_num=10, subject="science", chapter=3)
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -323,6 +328,73 @@ class EduMindAgent:
             class_num       = class_num,
             n               = n,
         )
+
+    def generate_all(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+        num_flashcards:    int = 15,
+        num_hot_questions: int = 10,
+    ) -> dict:
+        """
+        Runs every chapter-level generator — flashcards, highlights, notes,
+        hot questions, formula sheet — concurrently instead of one after
+        another. The chapter must already be ingested. Personalized tests
+        and semantic search need extra input from the user (student
+        profile, a query), so they aren't part of this bundle.
+
+        Returns a dict keyed by feature name ("flashcards", "highlights",
+        "notes", "hot_questions", "formula_sheet"). If a generator raises,
+        its value is the exception instead of a result — one slow or
+        failed feature doesn't block the others from completing.
+        """
+        collection_name = self._require_indexed(class_num, subject, chapter)
+
+        jobs = {
+            "flashcards": lambda: self.flashcard.generate(
+                collection_name = collection_name,
+                subject         = subject,
+                chapter         = chapter,
+                class_num       = class_num,
+                n               = num_flashcards,
+            ),
+            "highlights": lambda: self._tag_chapter(class_num, subject, chapter),
+            "notes": lambda: self.notes.generate(
+                collection_name = collection_name,
+                subject         = subject,
+                chapter         = chapter,
+                class_num       = class_num,
+            ),
+            "hot_questions": lambda: self.hot_questions.generate(
+                collection_name = collection_name,
+                subject         = subject,
+                chapter         = chapter,
+                class_num       = class_num,
+                n               = num_hot_questions,
+            ),
+            "formula_sheet": lambda: self.formula_sheet.generate(
+                collection_name = collection_name,
+                subject         = subject,
+                chapter         = chapter,
+                class_num       = class_num,
+            ),
+        }
+
+        console.rule(f"[bold]Generating everything (parallel): {collection_name}[/bold]")
+        results: dict = {}
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            future_to_name = {pool.submit(fn): name for name, fn in jobs.items()}
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    results[name] = future.result()
+                    console.print(f"[green]✓ {name} done[/green]")
+                except Exception as e:
+                    console.print(f"[red]✗ {name} failed:[/red] {e}")
+                    results[name] = e
+
+        return results
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal Helpers
