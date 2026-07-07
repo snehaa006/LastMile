@@ -136,6 +136,12 @@ class PDFParser:
             if chunk_text:
                 chunks.append({"text": chunk_text, "start": start})
 
+            # Reached the end of the text — stop, otherwise `start` recomputes
+            # to the same value forever (CHUNK_SIZE > CHUNK_OVERLAP guarantees
+            # end - CHUNK_OVERLAP + CHUNK_SIZE >= total once end == total).
+            if end >= total:
+                break
+
             # Advance with overlap
             start = end - CHUNK_OVERLAP
 
