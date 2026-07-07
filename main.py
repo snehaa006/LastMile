@@ -71,8 +71,21 @@ def print_highlights(tagged_chunks, n=3):
 def print_notes(notes, n=3):
     console.print(Panel(notes.tldr, title="TL;DR", border_style="magenta"))
     for section in notes.sections[:n]:
-        bullets = "\n".join(f"  • {b}" for b in section.bullets)
-        console.print(Panel(bullets, title=section.heading, border_style="magenta"))
+        lines = []
+        if section.big_idea:
+            lines.append(f"[bold]Big idea:[/bold] {section.big_idea}\n")
+        for block in section.blocks:
+            if block.type == "definition":
+                lines.append(f"[bold]{block.title}:[/bold] {block.content}")
+            elif block.type == "formula":
+                lines.append(f"[yellow]{block.title}:[/yellow] {block.content}")
+            elif block.type == "example":
+                lines.append(f"[dim]Example — {block.title}:[/dim] {block.content}")
+            elif block.type == "bullets":
+                lines.extend(f"  • {b}" for b in block.items)
+            elif block.type == "table" and block.table_rows:
+                lines.append(f"[bold]{block.title}[/bold] ({len(block.table_rows)}-row table)")
+        console.print(Panel("\n".join(lines) or "(no content)", title=section.heading, border_style="magenta"))
 
 
 def print_hot_questions(questions, n=5):
