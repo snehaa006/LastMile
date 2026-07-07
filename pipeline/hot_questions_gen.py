@@ -22,12 +22,11 @@ Usage:
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
-import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, LLM_MODEL
+from pipeline.llm_client import LLMClient
 from pipeline.vector_store import VectorStore
 
 console = Console()
@@ -58,9 +57,9 @@ class HotQuestion:
 
 class HotQuestionsGenerator:
 
-    def __init__(self):
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        self._store  = VectorStore()
+    def __init__(self, store: Optional[VectorStore] = None):
+        self._client = LLMClient()
+        self._store  = store or VectorStore()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -158,12 +157,7 @@ Format:
   }}
 ]
 """
-        message = self._client.messages.create(
-            model      = LLM_MODEL,
-            max_tokens = 3072,
-            messages   = [{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text
+        return self._client.complete(prompt, max_tokens=3072)
 
     def _parse(self, raw: str) -> list[HotQuestion]:
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()

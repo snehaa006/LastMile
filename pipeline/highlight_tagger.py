@@ -16,10 +16,9 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, LLM_MODEL
+from pipeline.llm_client import LLMClient
 from pipeline.pdf_parser import Chunk
 
 console = Console()
@@ -46,7 +45,7 @@ class TaggedChunk:
 class HighlightTagger:
 
     def __init__(self):
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self._client = LLMClient()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -144,12 +143,7 @@ Chunks:
 {chunks_json}
 """
 
-        message = self._client.messages.create(
-            model      = LLM_MODEL,
-            max_tokens = 2048,
-            messages   = [{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text
+        raw = self._client.complete(prompt, max_tokens=2048)
 
         # Parse response
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
