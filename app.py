@@ -218,25 +218,46 @@ else:  # Upload your own PDF
             collection_name   = agent.collection_name(class_num, subject, chapter)
             ready_to_generate = True
 
+def _ingest() -> bool:
+    """Fetches/indexes the current chapter. Returns True on success."""
+    try:
+        if source_mode == "NCERT Catalog":
+            agent.ingest_chapter(class_num, subject, chapter)
+        else:
+            agent.ingest_uploaded_pdf(upload_pdf_path, book_title, upload_start_page, upload_end_page)
+        return True
+    except Exception as e:
+        st.sidebar.error(f"Ingest failed: {e}")
+        return False
+
+
 st.sidebar.markdown("---")
-st.sidebar.header("2. Generate")
-st.sidebar.caption(
-    "Fetches/indexes the chapter (if needed) and runs flashcards, highlights, "
-    "notes, hot questions, and a formula sheet — all in parallel."
-)
+st.sidebar.header("2. Index the chapter")
+st.sidebar.caption("Free — no LLM calls. Required before generating anything below.")
 
 already_ingested = ready_to_generate and agent.is_ingested(class_num, subject, chapter)
 
 if ready_to_generate:
+    if st.sidebar.button("📥 Fetch & Index", use_container_width=True):
+        with st.spinner("Fetching + indexing..."):
+            if _ingest():
+                st.rerun()
+
+    if already_ingested:
+        st.sidebar.success(f"Indexed: `{collection_name}`")
+    else:
+        st.sidebar.warning("Not indexed yet — click the button above.")
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("3. Generate")
+    st.sidebar.caption(
+        "Either go tab by tab below (one feature at a time — the safer choice "
+        "on the Gemini free tier's 5-requests/minute limit), or generate "
+        "everything at once here."
+    )
     if st.sidebar.button("🚀 Fetch, Index & Generate Everything", type="primary", use_container_width=True):
         with st.spinner("Fetching + indexing..."):
-            try:
-                if source_mode == "NCERT Catalog":
-                    agent.ingest_chapter(class_num, subject, chapter)
-                else:
-                    agent.ingest_uploaded_pdf(upload_pdf_path, book_title, upload_start_page, upload_end_page)
-            except Exception as e:
-                st.sidebar.error(f"Ingest failed: {e}")
+            if not _ingest():
                 st.stop()
         with st.spinner("Running all generators in parallel — this calls the LLM 5 times at once..."):
             results = agent.generate_all(class_num, subject, chapter)
@@ -253,13 +274,8 @@ if ready_to_generate:
             st.sidebar.success(f"Done — {len(results) - len(failed)}/{len(results)} features generated.")
             st.rerun()
 
-    if already_ingested:
-        st.sidebar.success(f"Indexed: `{collection_name}`")
-    else:
-        st.sidebar.warning("Not indexed yet — click the button above.")
-
 if not already_ingested:
-    st.info("👈 Pick a chapter (or upload a PDF) and click **Fetch, Index & Generate Everything** in the sidebar.")
+    st.info("👈 Pick a chapter (or upload a PDF), then click **Fetch & Index** in the sidebar to get started.")
     st.stop()
 
 if source_mode == "NCERT Catalog":

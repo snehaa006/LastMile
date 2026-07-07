@@ -25,8 +25,11 @@ console = Console()
 
 ImportanceLevel = Literal["HIGH", "MEDIUM", "LOW"]
 
-# Process in batches to stay within token limits
-BATCH_SIZE = 8
+# Process in batches to stay within token limits. Kept large deliberately —
+# each additional batch is a separate LLM call, and free-tier rate limits
+# (e.g. Gemini's 5 requests/minute) make call *count* the real constraint,
+# not the (generous) context window.
+BATCH_SIZE = 32
 
 
 @dataclass
@@ -143,7 +146,7 @@ Chunks:
 {chunks_json}
 """
 
-        raw = self._client.complete(prompt, max_tokens=2048)
+        raw = self._client.complete(prompt, max_tokens=256 * len(chunks))
 
         # Parse response
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
