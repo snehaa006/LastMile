@@ -39,6 +39,8 @@ from config import UPLOAD_PDF_PATH
 from pipeline.flashcard_gen     import Flashcard, FlashcardGenerator
 from pipeline.formula_sheet_gen import FormulaSheet, FormulaSheetGenerator
 from pipeline.highlight_tagger  import HighlightTagger, TaggedChunk
+from pipeline.homework_gen      import HomeworkGenerator, HomeworkPaper, PaperBlock
+from pipeline.homework_grader   import HomeworkGrader, PaperGrade
 from pipeline.hot_questions_gen import HotQuestion, HotQuestionsGenerator
 from pipeline.ncert_fetcher     import NCERTFetcher
 from pipeline.notes_gen         import ChapterNotes, NotesGenerator
@@ -102,6 +104,8 @@ class EduMindAgent:
         self.formula_sheet = FormulaSheetGenerator(store=self.store)
         self.notes         = NotesGenerator(store=self.store)
         self.hot_questions = HotQuestionsGenerator(store=self.store)
+        self.homework      = HomeworkGenerator(store=self.store)
+        self.grader        = HomeworkGrader()
         # In-memory record of where each ingested collection's source PDF
         # lives (and what page range, for uploaded books) — lets
         # _tag_chapter() re-parse without guessing the source. Lost on
@@ -344,6 +348,60 @@ class EduMindAgent:
             class_num       = class_num,
             n               = n,
         )
+
+    def list_sections(
+        self,
+        class_num: int,
+        subject:   str,
+        chapter:   int,
+    ) -> list[str]:
+        """
+        Returns the indexed chapter's section/topic headings, so the Homework
+        composition builder can offer section-level scoping ("generate only
+        from these parts of the chapter"). Empty if the chapter isn't indexed
+        or no headings were extracted.
+        """
+        collection_name = self._collection_name(class_num, subject, chapter)
+        return self.store.get_sections(collection_name)
+
+    def generate_homework(
+        self,
+        class_num:  int,
+        subject:    str,
+        chapter:    int,
+        blocks:     list[PaperBlock],
+        difficulty: str = "medium",
+        sections:   Optional[list[str]] = None,
+    ) -> HomeworkPaper:
+        """
+        Generates an exam-style homework paper for an already-indexed chapter
+        from a composition of question blocks (each a count + style + optional
+        difficulty), optionally scoped to specific chapter sections. This is
+        the AI-generation half of the Homework feature; grade the student's
+        answers with grade_homework().
+        """
+        collection_name = self._require_indexed(class_num, subject, chapter)
+        return self.homework.generate(
+            collection_name = collection_name,
+            subject         = subject,
+            chapter         = chapter,
+            class_num       = class_num,
+            blocks          = blocks,
+            difficulty      = difficulty,
+            sections        = sections,
+        )
+
+    def grade_homework(
+        self,
+        paper:   HomeworkPaper,
+        answers: dict,
+    ) -> PaperGrade:
+        """
+        Grades a student's answers to a generated homework paper — objective
+        questions (MCQ/fill-blank) locally, subjective questions via a single
+        batched LLM call against each question's mark scheme.
+        """
+        return self.grader.grade(paper, answers)
 
     def generate_all(
         self,

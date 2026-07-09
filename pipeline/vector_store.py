@@ -194,6 +194,29 @@ class VectorStore:
         except Exception:
             return False
 
+    def get_sections(self, collection_name: str) -> list[str]:
+        """
+        Returns the chapter's extracted section/topic headings for an indexed
+        collection, so a caller can offer section-level scoping (e.g. the
+        Homework composition builder). PDFParser stores the chapter's headings
+        as a comma-joined "topics" string on every chunk's metadata; this
+        splits and de-duplicates them across the collection, preserving order.
+        """
+        try:
+            collection = self._client.get_collection(collection_name)
+        except Exception:
+            return []
+        metas = collection.get(include=["metadatas"]).get("metadatas") or []
+        sections: list[str] = []
+        seen: set[str] = set()
+        for meta in metas:
+            for topic in (meta.get("topics", "") or "").split(","):
+                topic = topic.strip()
+                if topic and topic.lower() not in seen:
+                    seen.add(topic.lower())
+                    sections.append(topic)
+        return sections
+
     # ──────────────────────────────────────────────────────────────────────────
     # Internal Helpers
     # ──────────────────────────────────────────────────────────────────────────

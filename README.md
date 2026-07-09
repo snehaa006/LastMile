@@ -22,6 +22,13 @@ Give it a class, subject, and chapter. It:
    - **Highlights** — HIGH/MEDIUM/LOW importance tagging per paragraph, plus
      key terms worth a popup definition, for an "e-textbook" reading view
    - **Notes** — condensed revision notes (TL;DR + bulleted sections)
+   - **Questions (Homework)** — compose an exam-style paper by mixing
+     question blocks (by board & type: CBSE MCQ / Assertion-Reason / VSA /
+     SA / LA / case-study, plus IGCSE, IBDP, AS/A-Level, AP and generic
+     types), optionally scoped to specific sections of the chapter, then
+     attempt it and get it **graded by AI** — objective questions
+     (MCQ/fill-blank) matched automatically, subjective answers marked
+     against a generated mark scheme
 
 This is **Phase 1**: a working core pipeline, single content source, local
 storage, dashboard-driven. It is meant to be reliable and cleanly separated
@@ -131,7 +138,10 @@ demand, each cached in its own tab so switching tabs doesn't lose results.
 │   ├── test_builder.py         ← personalized test generation
 │   ├── formula_sheet_gen.py    ← formula sheet extraction (maths/science)
 │   ├── notes_gen.py            ← condensed revision notes
-│   └── hot_questions_gen.py    ← likely-exam-question prediction
+│   ├── hot_questions_gen.py    ← likely-exam-question prediction
+│   ├── homework_styles.py      ← style-template library (board × question type)
+│   ├── homework_gen.py         ← exam-paper generation from a composition of blocks
+│   └── homework_grader.py      ← AI grading (auto objective + mark-scheme subjective)
 │
 ├── agents/
 │   └── orchestrator.py         ← ties all pipeline components together
@@ -202,6 +212,62 @@ are other *specific* open educational sources (another government/state
 board site that publishes free PDFs the way NCERT does) you want added as
 a structured catalog like the NCERT one, name them and that's a reasonable,
 legitimate addition — a generic "find and download any book" scraper isn't.
+
+## Questions / Homework generator (generate → attempt → AI-grade)
+
+The **📝 Questions** tab is a full homework generator + grader, adapted from
+the Ascend Now Homework Generator into EduMind's RAG stack (no
+teacher/student accounts — just the AI generation and grading). It reuses the
+same fetch → parse → embed pipeline every other feature uses, so any indexed
+NCERT chapter or uploaded PDF works.
+
+The flow:
+
+1. **Section scoping (optional).** The chapter's extracted section headings
+   are offered as a multiselect; pick a few to generate *only* from those
+   parts of the chapter (retrieval is seeded by the chosen section titles),
+   or leave it empty to span the whole chapter.
+2. **Compose the paper.** A composition builder (an editable grid) lets you
+   mix **blocks** — each block is `N questions × a style × difficulty`. Styles
+   come from `pipeline/homework_styles.py`, a library of exam formats
+   (`question_type` is the controlled value both generation and grading branch
+   on: `mcq`/`fill_blank` are auto-graded, `short_answer`/`structured`/
+   `extended_response`/`essay` are mark-scheme graded).
+3. **Generate.** Each block is one structured-JSON LLM call (blocks run
+   concurrently), grounded in the retrieved content, validated per type
+   (right option count, a real question stem + a mark scheme whose points sum
+   to the marks) with one retry on failure. A failed block contributes an
+   error note rather than sinking the whole paper.
+4. **Attempt & grade.** Answer the paper inline, then submit: MCQ is graded by
+   option match, fill-blank by normalized string match against the
+   expected/acceptable answers, and **all** subjective questions in a single
+   batched LLM call that scores each answer point-by-point against its mark
+   scheme (per-point marks clamped to their max and to the question total).
+   If the AI grading call fails, objective marks are still returned and the
+   subjective questions come back *pending review* — the paper never fails to
+   grade. An answer key + mark scheme is always viewable.
+
+Programmatically:
+
+```python
+from agents.orchestrator import EduMindAgent
+from pipeline.homework_gen import PaperBlock
+
+agent = EduMindAgent()
+agent.ingest_chapter(class_num=10, subject="science", chapter=1)
+
+sections = agent.list_sections(10, "science", 1)          # optional scoping
+paper = agent.generate_homework(
+    class_num=10, subject="science", chapter=1,
+    blocks=[PaperBlock(count=5, style="CBSE_MCQ"),
+            PaperBlock(count=3, style="CBSE_SA")],
+    difficulty="medium",
+    sections=sections[:2] or None,
+)
+
+grade = agent.grade_homework(paper, answers={"q1": 0, "q2": "mitochondria", ...})
+print(grade.total_marks, "/", grade.max_marks, f"({grade.percentage}%)")
+```
 
 ## Quick Usage
 
