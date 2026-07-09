@@ -13,6 +13,7 @@ Run:
 import html
 import os
 
+import pandas as pd
 import streamlit as st
 
 # On Streamlit Community Cloud, API keys are set as "secrets" (st.secrets),
@@ -28,6 +29,8 @@ except Exception:
 
 from agents.orchestrator import EduMindAgent
 from config import NCERT_CODES
+from pipeline.homework_gen import PaperBlock
+from pipeline.homework_styles import STYLE_TEMPLATES, get_template
 
 st.set_page_config(page_title="EduMind Dashboard", page_icon="📚", layout="wide")
 
@@ -119,6 +122,91 @@ def render_block(block) -> None:
             f"<tbody>{rows_html}</tbody></table>",
             unsafe_allow_html=True,
         )
+
+
+def render_answer_key(paper) -> None:
+    """The teacher-facing answer sheet: correct options, expected answers, and
+    mark schemes for every question in the paper."""
+    for i, q in enumerate(paper.questions, 1):
+        st.markdown(f"**Q{i}. [{q.marks}m]** {esc(q.prompt)}", unsafe_allow_html=True)
+        if q.type == "mcq":
+            for j, opt in enumerate(q.options):
+                mark = "  ✅" if j == q.correct_index else ""
+                st.write(f"{chr(65 + j)}. {opt}{mark}")
+        elif q.type == "fill_blank":
+            st.write(f"Answer: **{q.expected_answer}**")
+            if q.acceptable_answers:
+                st.caption("Also accepted: " + ", ".join(q.acceptable_answers))
+        else:
+            if q.model_answer:
+                st.caption(f"Model answer: {q.model_answer}")
+            for pp in q.mark_scheme:
+                st.write(f"- ({pp.marks}m) {pp.point}")
+        st.markdown("---")
+
+
+def render_homework(agent, paper, grade_key: str) -> None:
+    """Renders the attempt form for a generated paper, grades it on submit,
+    and shows per-question marks + feedback."""
+    if paper.errors:
+        for e in paper.errors:
+            st.warning(e)
+    if not paper.questions:
+        st.error("No questions were generated — adjust the composition and try again.")
+        return
+
+    st.success(f"Paper ready: **{paper.total_questions} questions · {paper.total_marks} marks**"
+               + (f" · sections: {', '.join(paper.sections)}" if paper.sections else " · whole chapter"))
+
+    with st.form(key=f"hw_form::{paper.paper_id}"):
+        answers: dict = {}
+        for i, q in enumerate(paper.questions, 1):
+            tmpl = STYLE_TEMPLATES.get(q.style)
+            label = tmpl.label if tmpl else q.type
+            st.markdown(f"**Q{i}. [{q.marks}m · {label}]**")
+            st.write(q.prompt)
+            wkey = f"hw_w::{paper.paper_id}::{q.id}"
+            if q.type == "mcq":
+                answers[q.id] = st.radio(
+                    "Choose one", options=list(range(len(q.options))),
+                    format_func=lambda j, opts=q.options: opts[j],
+                    index=None, key=wkey, label_visibility="collapsed",
+                )
+            elif q.type == "fill_blank":
+                answers[q.id] = st.text_input("Your answer", key=wkey, label_visibility="collapsed")
+            else:
+                answers[q.id] = st.text_area("Your answer", key=wkey, label_visibility="collapsed", height=120)
+            st.markdown("---")
+        submitted = st.form_submit_button("✅ Submit for grading", type="primary")
+
+    if submitted:
+        with st.spinner("Grading with AI (objective auto-marked, subjective marked against the scheme)..."):
+            try:
+                st.session_state[grade_key] = agent.grade_homework(paper, answers)
+            except Exception as e:
+                st.error(f"Grading failed: {e}")
+
+    grade = st.session_state.get(grade_key)
+    if grade and grade.paper_id == paper.paper_id:
+        st.markdown(f"### 🎯 Result: {grade.total_marks} / {grade.max_marks} ({grade.percentage}%)")
+        st.progress(min(1.0, grade.percentage / 100))
+        if grade.ai_incomplete:
+            st.warning("Some subjective answers couldn't be auto-graded and are marked "
+                       "*pending* — review them against the answer key below.")
+        by_id = {g.question_id: g for g in grade.per_question}
+        for i, q in enumerate(paper.questions, 1):
+            g = by_id.get(q.id)
+            if not g:
+                continue
+            icon = "✅" if g.awarded == g.max else ("🟡" if g.awarded > 0 else "❌")
+            with st.expander(f"{icon} Q{i}: {g.awarded}/{g.max} marks · graded by {g.graded_by}"):
+                st.write(q.prompt)
+                st.caption(f"Feedback: {g.feedback}")
+                for pp in g.per_point:
+                    st.write(f"- ({pp.awarded}/{pp.max}) {pp.point}")
+
+    with st.expander("🔑 Answer key & mark scheme"):
+        render_answer_key(paper)
 
 
 @st.cache_resource(show_spinner="Initializing EduMind agent (loading embedding model)...")
@@ -290,6 +378,7 @@ overview_features = [
     ("notes", "📓 Notes"),
     ("hot", "🔥 Hot Questions"),
     ("formula", "Σ Formula Sheet"),
+    ("homework", "📝 Questions"),
 ]
 cols = st.columns(len(overview_features))
 for col, (key, label) in zip(cols, overview_features):
@@ -302,8 +391,12 @@ for col, (key, label) in zip(cols, overview_features):
     col.markdown(f'<div class="em-card"><h4>{label}</h4>{status_html}</div>', unsafe_allow_html=True)
 
 # ── Feature tabs — each also has its own regenerate button ─────────────────
-tab_flash, tab_highlight, tab_notes, tab_hot, tab_formula, tab_test, tab_search = st.tabs(
-    ["🃏 Flashcards", "🔍 Highlights", "📓 Notes", "🔥 Hot Questions", "Σ Formula Sheet", "📝 Test", "🔎 Search"]
+(
+    tab_flash, tab_highlight, tab_notes, tab_hot, tab_formula,
+    tab_questions, tab_test, tab_search,
+) = st.tabs(
+    ["🃏 Flashcards", "🔍 Highlights", "📓 Notes", "🔥 Hot Questions",
+     "Σ Formula Sheet", "📝 Questions", "🧪 Test", "🔎 Search"]
 )
 
 # ── Flashcards ───────────────────────────────────────────────────────────
@@ -433,6 +526,88 @@ with tab_formula:
             )
     else:
         st.caption("Not generated yet.")
+
+# ── Questions / Homework (compose → generate → attempt → AI grade) ─────────
+with tab_questions:
+    st.caption(
+        "Compose an exam-style paper by mixing question blocks (by board & type), "
+        "optionally scoped to specific sections of the chapter, then attempt it and "
+        "get it graded by AI — objective questions matched automatically, subjective "
+        "answers marked against a generated mark scheme."
+    )
+
+    hw_key    = result_key("homework", collection_name)
+    grade_key = f"hw_grade::{collection_name}"
+
+    # 1 ─ Section scoping
+    sections = agent.list_sections(class_num, subject, chapter)
+    if sections:
+        chosen_sections = st.multiselect(
+            "Scope to sections (optional — leave empty to use the whole chapter)",
+            options=sections, key=f"hw_sections::{collection_name}",
+        )
+    else:
+        chosen_sections = []
+        st.caption("No sub-sections were detected for this chapter — questions will span the whole chapter.")
+
+    # 2 ─ Composition builder (add/remove blocks; each = count × style × difficulty)
+    st.markdown("**Paper composition** — one row per block of questions. Add or delete rows freely.")
+    label_to_code = {t.label: code for code, t in STYLE_TEMPLATES.items()}
+    default_blocks = pd.DataFrame([
+        {"Questions": 5, "Style": STYLE_TEMPLATES["CBSE_MCQ"].label, "Difficulty": "(paper default)"},
+        {"Questions": 3, "Style": STYLE_TEMPLATES["CBSE_SA"].label,  "Difficulty": "(paper default)"},
+    ])
+    edited = st.data_editor(
+        default_blocks,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"hw_editor::{collection_name}",
+        column_config={
+            "Questions": st.column_config.NumberColumn(min_value=1, max_value=30, step=1),
+            "Style": st.column_config.SelectboxColumn(options=list(label_to_code.keys()), width="large"),
+            "Difficulty": st.column_config.SelectboxColumn(options=["(paper default)", "easy", "medium", "hard"]),
+        },
+    )
+
+    col_a, col_b = st.columns([1, 1])
+    paper_difficulty = col_a.selectbox("Paper difficulty", ["easy", "medium", "hard"], index=1, key=f"hw_diff::{collection_name}")
+    total_q = int(pd.to_numeric(edited["Questions"], errors="coerce").fillna(0).sum()) if len(edited) else 0
+    col_b.metric("Total questions", total_q)
+
+    if st.button("🚀 Generate paper", type="primary", key=f"hw_gen::{collection_name}"):
+        blocks = []
+        for _, row in edited.iterrows():
+            code  = label_to_code.get(row.get("Style"))
+            count = int(row.get("Questions") or 0) if pd.notna(row.get("Questions")) else 0
+            if not code or count < 1:
+                continue
+            diff = row.get("Difficulty")
+            blocks.append(PaperBlock(
+                count=count, style=code,
+                difficulty="" if diff in (None, "(paper default)") else str(diff),
+            ))
+        if not blocks:
+            st.error("Add at least one valid block (a positive question count and a style).")
+        else:
+            with st.spinner(f"Generating {total_q} questions across {len(blocks)} block(s) with AI..."):
+                try:
+                    paper = agent.generate_homework(
+                        class_num, subject, chapter,
+                        blocks=blocks, difficulty=paper_difficulty,
+                        sections=chosen_sections or None,
+                    )
+                    st.session_state[hw_key] = paper
+                    st.session_state.pop(grade_key, None)
+                except Exception as e:
+                    st.error(str(e))
+
+    # 3 ─ Attempt + grade the generated paper
+    paper = st.session_state.get(hw_key)
+    if paper is not None:
+        st.markdown("---")
+        render_homework(agent, paper, grade_key)
+    else:
+        st.info("Set up your composition above and click **Generate paper** to begin.")
 
 # ── Personalized Test ────────────────────────────────────────────────────
 with tab_test:
